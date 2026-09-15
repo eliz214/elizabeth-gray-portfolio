@@ -1,0 +1,242 @@
+/* ============================================================================
+   MIDI BEAT WIDGET  ·  72 BPM · 16 bars · 53.333 s loop · 11 stems
+   Scoped under .widget so it coexists with the landing page's own styles/tokens
+   (the page already defines --bg / --ink at :root — this widget keeps its own
+   copies of those names local to .widget instead of overriding the page's).
+
+   GLOBAL RECOLOR: instrument colours are CSS custom properties on .widget
+   (--c-*). Change them there and every dot re-tints. (The scrolling MIDI
+   art has its colours baked into the SVG files.)
+
+   AUDIO ↔ VISUAL SYNC: the engine auto-subtracts the output device's latency
+   (AudioContext.outputLatency — covers Bluetooth), plus a small fixed
+   DEFAULT_SYNC_PX for residual display/perception offset. To re-measure, open
+   the page with  ?tune  and nudge live with the ← → arrow keys (Shift = ±10).
+   ============================================================================ */
+@property --aR{ syntax:"<number>"; inherits:true; initial-value:1; }
+
+.widget{
+  /* --bg MUST match the page this widget sits on: the idle dim and the
+     highlight veil are drawn with it. */
+  --bg:#FCFEFA;
+  --ink:#1c1c1c;
+  --ink-soft:#6a6a6a;
+  --ink-faint:#a8a8a8;
+
+  /* instrument colours — pulled from the MIDI artwork */
+  --c-drums:#127C8D;
+  --c-perc:#00DCFF;
+  --c-bass:#CC2936;
+  --c-distort:#E8590C;
+  --c-gtr:#00AF54;
+  --c-gtr-chords:#84B099;
+  --c-gtr-hi:#5BECA1;
+  --c-synth:#FFE347;
+  --c-mm:#EF9BF6;
+  --c-mm-fx:#E500F9;
+
+  --cursor-x:36px;        /* playhead offset from left — mobile  */
+  --a-left:.30;           /* opacity of everything left of the cursor line */
+  --a-preview:.12;        /* other lanes' opacity while one instrument is focused */
+  --hover-veil:.88;       /* bg-coloured wash over midi during a flash */
+
+  /* geometry — set from JS constants at boot (STAFF_H etc.) */
+  --stage-h:340px;
+  --lane-top:18px;        /* cursor overhang above the staff */
+  --staff-h:300px;
+  --strip-top:322px;      /* staff bottom + gap → drum/perc strips */
+  --strip-h:19px;
+  --cursor-h:336px;       /* playhead, scaled by S, centred on the staff */
+
+  width:100%; display:flex; flex-direction:column; gap:22px; padding:24px 0 40px;
+  color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+@media (min-width:768px){ .widget{ --cursor-x:120px; } }
+
+/* ---------- stage ---------- */
+.widget .stage{
+  position:relative;
+  width:100%;
+  height:var(--stage-h);
+  overflow:hidden;
+  user-select:none;
+  touch-action:manipulation;
+  cursor:pointer;              /* the whole strip is click-to-play / click-to-pause */
+}
+.widget .lanes{ position:absolute; inset:0; }
+
+/* .layer = a stationary, viewport-anchored window (so the mask is in screen px).
+   .track = the wide tiled ribbon that actually scrolls inside it.              */
+.widget .layer{
+  position:absolute;
+  left:0; right:0; top:var(--lane-top); height:var(--staff-h);
+  overflow:hidden;
+  opacity:0;
+  --edge:0px;                  /* per-frame: blank everything left of this x (track catch-up) */
+  --aR:1;                      /* opacity right of the cursor (dips for highlight / when idle) */
+  /* one gradient: [0..edge] blank · [edge..cursor] passed (30%) · [cursor..] --aR */
+  -webkit-mask-image:linear-gradient(90deg,
+     transparent 0,transparent var(--edge),
+     rgba(0,0,0,var(--a-left)) var(--edge),rgba(0,0,0,var(--a-left)) var(--cursor-x),
+     rgba(0,0,0,var(--aR)) var(--cursor-x),rgba(0,0,0,var(--aR)) 100%);
+          mask-image:linear-gradient(90deg,
+     transparent 0,transparent var(--edge),
+     rgba(0,0,0,var(--a-left)) var(--edge),rgba(0,0,0,var(--a-left)) var(--cursor-x),
+     rgba(0,0,0,var(--aR)) var(--cursor-x),rgba(0,0,0,var(--aR)) 100%);
+  transition:opacity .16s ease, --aR .12s ease;
+}
+.widget .layer.show,.widget .layer.staff{ opacity:1; }
+.widget .layer.strip{ top:var(--strip-top); height:var(--strip-h); }   /* drums, perc — below the staff */
+.widget .layer .track{
+  position:absolute; top:0;
+  /* left is set per-layer in JS: (cursor-x − one tile width) of head-room */
+  display:flex; flex-wrap:nowrap; align-items:flex-start;
+  will-change:transform;
+}
+.widget .layer .track img{ display:block; flex:none; }
+
+/* highlight: a bg-coloured wash sits above every lane except the hovered one,
+   which is lifted above the wash (matches the Figma rectangle-at-70% approach) */
+.widget .veil{
+  position:absolute; inset:0; z-index:15;
+  background:var(--bg);
+  opacity:0; pointer-events:none;
+  transition:opacity .12s ease;
+}
+.widget .veil.on{ opacity:var(--hover-veil); }
+.widget .veil.slow{ transition:opacity 1s ease; }        /* mobile tap release */
+
+/* focus highlight: the OTHER note lanes recede (right-of-cursor drops to ~12%);
+   the focused lane and the staff are untouched, and nothing re-orders. */
+.widget .layer.dim{ --aR:var(--a-preview); }
+
+/* idle (pre-play or paused): everything at --a-left, uniform, no highlight */
+.widget:not(.playing) .layer{ --aR:var(--a-left); }
+.widget:not(.playing) .cursor,
+.widget:not(.playing) .rack{ opacity:var(--a-left); }
+.widget:not(.playing) .rack{ pointer-events:none; }   /* controls frozen until playing */
+
+/* ---------- playhead ---------- */
+.widget .cursor{
+  position:absolute; top:0; left:var(--cursor-x);
+  height:100%; width:0; z-index:20; pointer-events:none;
+  transition:opacity .3s ease;
+}
+.widget .cursor img{ position:absolute; top:0; left:0; height:var(--cursor-h); width:auto; transform:translateX(-50%); }
+.widget .cursor .fallback{ position:absolute; top:0; height:var(--cursor-h); left:-1px; width:2px; background:var(--ink); }
+
+/* ---------- start / pause affordance — in front of everything ---------- */
+.widget .start{
+  position:absolute; inset:0; z-index:40;
+  display:flex; align-items:center; justify-content:center;
+  cursor:pointer;
+  transition:opacity .3s ease;
+}
+.widget .start .btn{ width:56px; height:56px; }
+.widget .start .btn img{ width:100%; height:100%; display:block; }
+.widget .start.hidden{ opacity:0; pointer-events:none; }
+
+/* ---------- instrument rack ---------- */
+.widget .rack{
+  display:flex; justify-content:center; align-items:center;
+  gap:clamp(16px,4.5vw,52px); flex-wrap:wrap; padding:0 16px;
+  transition:opacity .3s ease;
+}
+.widget .group{ display:flex; align-items:center; gap:10px; }
+.widget .group .icon{
+  width:40px; height:40px; flex:none; padding:0; border:0; background:none; cursor:pointer;
+}
+.widget .group .icon img{ width:100%; height:100%; display:block; pointer-events:none; }
+.widget .group .icon:focus-visible{ outline:2px solid var(--ink); outline-offset:3px; border-radius:6px; }
+.widget .group .dots{ display:flex; gap:8px; }
+.widget .group .slot{
+  width:24px; height:24px; position:relative; padding:0; border:0; background:none; cursor:pointer;
+}
+.widget .group .slot svg{ width:100%; height:100%; display:block; pointer-events:none; }
+/* tint ONLY the inner blob of the dot — outline + PERC/DISTORT/FX lettering stay black */
+.widget .group .slot.filled svg [fill="#7D7D7D"]{ fill:var(--tint); }
+/* CSS fallback dot (when the dot SVG can't be fetched, e.g. file://) */
+.widget .group .slot.css::after{
+  content:""; position:absolute; inset:3px; border-radius:50%;
+  border:2px solid var(--ink-faint);
+}
+.widget .group .slot.css.filled::after{ background:var(--tint); border-color:var(--tint); }
+
+.widget .banner{
+  margin:0 16px; padding:9px 12px; border-radius:8px;
+  background:#fff7e6; border:1px solid #f2d199; color:#8a5a00;
+  font-size:11px; display:none;
+}
+.widget .banner.show{ display:block; }
+.widget .banner code{ background:#0000000d; padding:1px 4px; border-radius:3px; }
+
+/* sync tuner (only with ?tune) */
+.tuner{
+  position:fixed; left:12px; bottom:12px; z-index:99;
+  font:12px/1.4 ui-monospace,Menlo,monospace;
+  background:#111; color:#eee; padding:8px 10px; border-radius:6px;
+}
+.tuner b{ color:#6ee; }
+
+/* ---------- intro ---------------------------------------------------------------
+   phase 1  — staff + note lanes + cursor + rack pop in from random vectors, at
+              FULL (100%) opacity.
+   phase 2  — everything eases down to the resting/idle look, and the play button
+              fades in.
+   All timing is driven by --i-* vars (intro panel: press I). */
+.widget{ --i-dur:3s; --i-blur:0px; --i-ease:cubic-bezier(.16,1,.3,1);
+       --i-settle:.8s; --i-play-fade:.5s; }
+
+@keyframes popIn    { from{ opacity:0; filter:blur(var(--i-blur)); transform:translate(var(--dx,0),var(--dy,0)); }
+                      to  { opacity:1; filter:blur(0); transform:none; } }
+@keyframes popPlain { from{ opacity:0; transform:translate(var(--dx,0),var(--dy,0)); }
+                      to  { opacity:1; transform:none; } }
+
+/* held state before the run (non-lit lanes stay hidden via .layer{opacity:0}) */
+.widget.intro .layer.show,
+.widget.intro .layer.staff,
+.widget.intro .cursor,
+.widget.intro .rack,
+.widget.intro .start{ opacity:0; }
+.widget.intro .layer{ filter:blur(var(--i-blur)); }
+
+/* phase 1 — pop in, all to 100% */
+.widget.intro-run .layer.show,
+.widget.intro-run .layer.staff,
+.widget.intro-run .cursor,
+.widget.intro-run .rack{ animation:popIn var(--i-dur) var(--i-ease) both; }
+.widget.intro-run .layer{ --aR:1; }               /* phase 1: fully bright, no left/right dim */
+.widget.intro-run:not(.settle) .start{ opacity:0; pointer-events:none; }
+
+/* phase 2 — settle to the idle look + reveal the play button */
+.widget.intro-run.settle .layer.show,
+.widget.intro-run.settle .layer.staff{
+  animation:none; transition:opacity var(--i-settle) ease; }
+.widget.intro-run.settle .layer{
+  --aR:var(--a-left); transition:--aR var(--i-settle) ease; }
+.widget.intro-run.settle .cursor,
+.widget.intro-run.settle .rack{
+  animation:none; opacity:var(--a-left); transition:opacity var(--i-settle) ease; }
+.widget.intro-run.settle .start{ animation:popPlain var(--i-play-fade) ease both; }
+
+@media (prefers-reduced-motion:reduce){
+  .widget .layer,.widget .lanes,.widget .cursor,.widget .rack{ transition:none; }
+  .widget.intro-run .layer.show,.widget.intro-run .layer.staff,
+  .widget.intro-run .cursor,.widget.intro-run .rack,.widget.intro-run .start{
+    animation-duration:.25s !important; animation-timing-function:ease !important;
+    animation-delay:0s !important; --dx:0 !important; --dy:0 !important; }
+}
+
+/* intro tweak panel (press I, or ?intro) */
+.ipanel{
+  position:fixed; right:12px; bottom:12px; z-index:99;
+  display:flex; flex-direction:column; gap:5px;
+  font:11px/1.3 ui-monospace,Menlo,monospace;
+  background:#111; color:#eee; padding:10px 12px; border-radius:8px;
+}
+.ipanel b{ color:#6ee; margin-bottom:2px; }
+.ipanel label{ display:flex; justify-content:space-between; align-items:center; gap:10px; }
+.ipanel input,.ipanel select{ width:120px; font:inherit; background:#222; color:#eee; border:1px solid #444; border-radius:4px; padding:2px 4px; }
+.ipanel button{ margin-top:4px; font:inherit; background:#2a6; color:#04140b; border:0; border-radius:4px; padding:4px; cursor:pointer; }
