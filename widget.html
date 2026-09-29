@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIDI Widget</title>
+<link rel="stylesheet" href="/assets/midi-widget.css">
+<script defer src="/assets/midi-widget.js"></script>
+<style>
+  /* Widget-only page, made to be embedded in Framer.
+     No styles.css here on purpose, so none of the site's layout,
+     nav, or margins sneak in. Keep this background the same as
+     --bg in assets/midi-widget.css and your Framer page color. */
+  html, body{
+    margin:0;
+    padding:0;
+    background:#FCFEFA;
+    overflow:hidden;
+  }
+</style>
+</head>
+<body>
+
+<div class="widget intro" id="widget">
+  <div class="banner" id="banner"></div>
+
+  <div class="stage" id="stage">
+    <div class="lanes" id="lanes"><div class="veil" id="veil"></div></div>
+    <div class="cursor" id="cursor"><span class="fallback"></span></div>
+    <div class="start" id="start"><span class="btn" id="startBtn"></span></div>
+  </div>
+
+  <div class="rack" id="rack"></div>
+</div>
+
+</body>
+</html>
