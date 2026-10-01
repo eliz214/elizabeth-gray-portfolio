@@ -187,7 +187,8 @@
               fades in.
    All timing is driven by --i-* vars (intro panel: press I). */
 .widget{ --i-dur:3s; --i-blur:0px; --i-ease:cubic-bezier(.16,1,.3,1);
-       --i-settle:.8s; --i-play-fade:.5s; }
+       --i-settle:.8s; --i-play-fade:.5s;
+       --i-settle-ease:cubic-bezier(.4,0,.2,1); }   /* gentle ease-in-out for the settle fade */
 
 @keyframes popIn    { from{ opacity:0; filter:blur(var(--i-blur)); transform:translate(var(--dx,0),var(--dy,0)); }
                       to  { opacity:1; filter:blur(0); transform:none; } }
@@ -213,13 +214,14 @@
 /* phase 2 — settle to the idle look + reveal the play button */
 .widget.intro-run.settle .layer.show,
 .widget.intro-run.settle .layer.staff{
-  animation:none; transition:opacity var(--i-settle) ease; }
+  animation:none;
+  transition:opacity var(--i-settle) var(--i-settle-ease), --aR var(--i-settle) var(--i-settle-ease); }
 .widget.intro-run.settle .layer{
-  --aR:var(--a-left); transition:--aR var(--i-settle) ease; }
+  --aR:var(--a-left);
+  transition:opacity var(--i-settle) var(--i-settle-ease), --aR var(--i-settle) var(--i-settle-ease); }
 .widget.intro-run.settle .cursor,
 .widget.intro-run.settle .rack{
-  animation:none; opacity:var(--a-left); transition:opacity var(--i-settle) ease; }
-.widget.intro-run.settle .start{ animation:popPlain var(--i-play-fade) ease both; }
+  animation:none; opacity:var(--a-left); transition:opacity var(--i-settle) var(--i-settle-ease); }
 
 @media (prefers-reduced-motion:reduce){
   .widget .layer,.widget .lanes,.widget .cursor,.widget .rack{ transition:none; }
