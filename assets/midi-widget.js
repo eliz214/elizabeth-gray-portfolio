@@ -634,8 +634,8 @@ function drawTuner(){
 let introShown = new URLSearchParams(location.search).has("intro");
 let introTimer = 0, introTimer2 = 0, introPanel = null;
 const introDefaults = {
-  dur:3, blur:0, stagger:0.7, pop:24, ease:"cubic-bezier(.16,1,.3,1)",   // phase 1 — pop-in
-  settle:1.0, playDelay:0.15, playFade:0.5,                              // phase 2 — settle + play
+  dur:1, blur:0, stagger:0.4, pop:24, ease:"ease",                       // phase 1 — pop-in
+  settle:1.2, playDelay:0, playFade:0.4,                                 // phase 2 — settle + play
 };
 const introCfg = {};
 Object.keys(introDefaults).forEach(k => {
