@@ -54,7 +54,19 @@ const LAYERS = [
   { id:"gtr_hi",     file:"gtrhi_midi.svg",    stems:["gtr_hi"] },
   { id:"mm_fx",      file:"mmfx_midi.svg",     stems:["mm_fx"] },
 ];
-LAYERS.forEach(L => L.w = MASTER_W);                // all tiles are one loop wide
+/* every tile repeats every MASTER_W px (one loop). The art files aren't all exactly
+   6400 px wide (staff.svg is 6402, drums_midi.svg is 6401), so each image is drawn at
+   its own true scaled width and pulled back with a negative margin so the repeat
+   distance stays MASTER_W. That removes the hairline gap at the loop seam and the
+   ~1 px staff-vs-notes drift toward the end of the loop. */
+const NATIVE_W = { staff:6402, drums:6401 };
+LAYERS.forEach(L => {
+  L.w    = MASTER_W;
+  L.imgW = Math.round(MASTER_W * (NATIVE_W[L.id] || 6400) / 6400 * 100) / 100;
+});
+/* per-lane visual nudge (px, negative = lane arrives at the cursor a touch later).
+   (drums stays at 0; try -2 if the drums ever feel early.) */
+const LANE_SYNC_PX = { drums: 0 };
 
 const STEMS = ["drums","perc","bass","bass_distort","gtr_low","gtr_hi","gtr_chords","mm","mm_fx","synth","synth_fx"];
 
@@ -116,6 +128,21 @@ let SYNC_OFFSET_PX = (() => {
    3. ASSETS
    =========================================================================== */
 const svgText = {};
+/* WHY THIS EXISTS: iPhones round each SVG <img>'s height down to a whole pixel
+   (e.g. 299.9 -> 299). Normally an SVG then "fits" itself inside the box and centres
+   itself, which shrinks the art a little and slides it sideways — by a different
+   amount for every file. That is what pushed the staff, notes, drums and cursor
+   out of line with each other on phones. Telling each SVG to stretch to fill its
+   box (preserveAspectRatio="none") makes the rounding harmless. */
+const artUrl = {};     // file -> blob: URL of that SVG with stretch-to-fill added
+async function fetchArt(file){
+  try{
+    const r = await fetch(asset(file)); if(!r.ok) throw 0;
+    let t = await r.text();
+    t = t.replace(/<svg\b([^>]*)>/, (m, a) => /preserveAspectRatio/.test(a) ? m : `<svg preserveAspectRatio="none"${a}>`);
+    artUrl[file] = URL.createObjectURL(new Blob([t], { type:"image/svg+xml" }));
+  }catch(e){ artUrl[file] = asset(file); }
+}
 async function fetchSVG(file){
   try{ const r = await fetch(asset(file)); if(!r.ok) throw 0; svgText[file] = await r.text(); }
   catch(e){ svgText[file] = null; }
@@ -200,6 +227,17 @@ async function loadAudio(){
   }));
 }
 
+/* smoothed visual clock. AudioContext.currentTime advances in coarse steps on phones,
+   which makes the scroll judder; we ride performance.now() and only let the audio
+   clock pull us gently (2 %/frame), re-anchoring if the two ever disagree by >250 ms. */
+let clkOff = null;
+function audioNow(){
+  const p = performance.now() / 1000, inst = AC.currentTime - p;
+  if(clkOff === null || Math.abs(inst - clkOff) > 0.25) clkOff = inst;
+  else clkOff += (inst - clkOff) * 0.02;
+  return p + clkOff;
+}
+
 const loopPos = () => ((AC.currentTime - T0) % LOOP_DUR + LOOP_DUR) % LOOP_DUR;
 
 /* how far (px) the visual should trail the clock to match the real output path.
@@ -209,11 +247,23 @@ const loopPos = () => ((AC.currentTime - T0) % LOOP_DUR + LOOP_DUR) % LOOP_DUR;
    LAG_CAP to 0 to disable device compensation entirely. */
 const LAG_BASELINE = 0.02, LAG_CAP = 0.30;
 let lagComp = localStorage.getItem("mbw_lagcomp") !== "0";   // toggle with L in the tuner
-function outputLagPx(){
+function rawLagPx(){
   if(!lagComp) return 0;
   const l = AC && AC.outputLatency;
   if(typeof l !== "number" || !isFinite(l)) return 0;
   return Math.min(LAG_CAP, Math.max(0, l - LAG_BASELINE)) * SCROLL_PPS;
+}
+/* phones report a jumpy outputLatency; follow it slowly (max ~6 px/s) so the
+   picture never lurches sideways when the number changes. */
+let lagCur = null;
+let lagSampleT = -1e9, lagRaw = 0;
+function outputLagPx(){
+  const nowMs = performance.now();
+  if(nowMs - lagSampleT > 500){ lagSampleT = nowMs; lagRaw = rawLagPx(); }   // AudioContext.outputLatency is slow to read
+  const t = lagRaw;
+  if(lagCur === null) lagCur = t;
+  else lagCur += Math.max(-0.1, Math.min(0.1, t - lagCur));
+  return lagCur;
 }
 
 /* audio + its midi always enter at the start of the next bar */
@@ -317,9 +367,20 @@ const startEl = document.getElementById("start");
 const layerEl = id => document.getElementById("layer-" + id);
 const trackEl = id => layerEl(id).firstElementChild;
 
-function cursorX(){
-  return parseFloat(getComputedStyle(widget).getPropertyValue("--cursor-x")) || 36;
+const DPR  = window.devicePixelRatio || 1;
+const snap = x => Math.round(x * DPR) / DPR;           // land on a real screen pixel: no shimmer
+function setEdge(el, v){                               // only touch the style when it actually changed
+  const s = v + "px";
+  if(el._edge !== s){ el._edge = s; el.style.setProperty("--edge", s); }
 }
+
+/* measured once at boot and on resize. (Reading computed style inside the animation
+   loop forces the browser to redo layout every frame, which is slow on phones.) */
+let CX = 36;
+function measureCursorX(){
+  CX = parseFloat(getComputedStyle(widget).getPropertyValue("--cursor-x")) || 36;
+}
+function cursorX(){ return CX; }
 
 function applyGeometry(){
   const r = widget.style;
@@ -341,9 +402,9 @@ function buildStage(){
     const track = document.createElement("div");
     track.className = "track";
     track.style.left = "calc(var(--cursor-x) - " + L.w + "px)";
-    const copies = Math.ceil((window.innerWidth + 2 * L.w) / L.w) + 2;
+    const copies = Math.ceil((Math.max(window.innerWidth, 2000) - cursorX()) / L.w) + 2;   // 3 on phones (was 5)
     let html = "";
-    for(let c = 0; c < copies; c++) html += `<img src="${asset(L.file)}" alt="" draggable="false" width="${L.w}">`;
+    for(let c = 0; c < copies; c++) html += `<img src="${artUrl[L.file] || asset(L.file)}" alt="" draggable="false" style="width:${L.imgW}px;margin-right:${(L.w - L.imgW).toFixed(2)}px">`;
     track.innerHTML = html;
     track.querySelectorAll("img").forEach(img =>
       img.addEventListener("error", () => { missing.add(L.file); updateBanner(); }, { once:true }));
@@ -352,9 +413,16 @@ function buildStage(){
   });
 
   const ci = new Image();
-  ci.onload  = () => cursor.insertBefore(ci, cursor.firstChild);
+  ci.onload  = () => {
+    cursor.insertBefore(ci, cursor.firstChild);
+    const fb = cursor.querySelector(".fallback");        // extra 2px line: start it at the triangle's base
+    if(fb){
+      const tri = 19.5 * CURSOR_H / 589;                 // triangle height in on-screen px
+      fb.style.top = tri + "px"; fb.style.height = (CURSOR_H - tri) + "px";
+    }
+  };
   ci.onerror = () => { missing.add("cursor.svg"); updateBanner(); };
-  ci.src = asset("cursor.svg");
+  ci.src = artUrl["cursor.svg"] || asset("cursor.svg");
 
   document.getElementById("startBtn").innerHTML =
     `<img src="${asset('icon_-_play.svg')}" alt="play" draggable="false">`;
@@ -367,7 +435,8 @@ function parkLayers(){
   const cx = cursorX();
   LAYERS.forEach(L => {
     trackEl(L.id).style.transform = "translateX(0px)";
-    layerEl(L.id).style.setProperty("--edge", cx + "px");
+    L.tf = null;
+    setEdge(layerEl(L.id), cx);
   });
 }
 
@@ -391,7 +460,7 @@ function refreshLayers(){
   LAYERS.forEach(L => {
     const el = layerEl(L.id);
     if(L.staff) return;                           // staff never dims / never re-orders
-    if(!playing) el.classList.toggle("show", litLayers.has(L.id));   // frame() owns it while playing
+    if(!playing){ el.classList.toggle("show", litLayers.has(L.id)); L.show = null; }   // frame() owns it while playing
     el.classList.toggle("dim", !!(hiLayers && !hiLayers.has(L.id))); // the non-focused lanes recede
   });
 
@@ -400,17 +469,22 @@ function refreshLayers(){
 
 function frame(){
   if(!playing) return;
-  const dist = (AC.currentTime - T0) * SCROLL_PPS + SYNC_OFFSET_PX - outputLagPx();
-  const cx = cursorX();
+  const dist = (audioNow() - T0) * SCROLL_PPS + SYNC_OFFSET_PX - outputLagPx();
+  const cx = CX;
 
-  LAYERS.forEach(L => {
-    const el = layerEl(L.id);
-    el.firstElementChild.style.transform = "translateX(" + (-(dist % L.w)) + "px)";
+  for(let i = 0; i < LAYERS.length; i++){
+    const L  = LAYERS[i];
+    const el = L.el || (L.el = layerEl(L.id));
+    const tr = L.track || (L.track = el.firstElementChild);
+    const d  = dist + (LANE_SYNC_PX[L.id] || 0);
+
+    const tf = "translate3d(" + snap(-(d % L.w)) + "px,0,0)";
+    if(L.tf !== tf){ L.tf = tf; tr.style.transform = tf; }
 
     if(L.staff){
       const edge = cx - dist;                 // sweeps in once on first load, then seamless
-      el.style.setProperty("--edge", (edge > 0 ? edge : 0) + "px");
-      return;
+      setEdge(el, edge > 0 ? Math.round(edge * 10) / 10 : 0);
+      continue;
     }
 
     // a note lane appears as soon as its audio is scheduled. --edge = the screen x
@@ -418,13 +492,19 @@ function frame(){
     // reaches the cursor exactly as the audio starts — so no box crosses unheard.
     let startD = null;
     if(litLayers.has(L.id)){
-      const ds = L.stems.filter(s => stemOn[s] && voiceStartDist[s] != null).map(s => voiceStartDist[s]);
-      if(ds.length) startD = Math.min(...ds);
+      for(let j = 0; j < L.stems.length; j++){
+        const st = L.stems[j];
+        if(stemOn[st] && voiceStartDist[st] != null){
+          const v = voiceStartDist[st];
+          if(startD === null || v < startD) startD = v;
+        }
+      }
     }
-    el.classList.toggle("show", startD != null);
-    const edge = startD != null ? cx - (dist - startD) : cx;
-    el.style.setProperty("--edge", (edge > 0 ? edge : 0) + "px");
-  });
+    const show = startD !== null;
+    if(L.show !== show){ L.show = show; el.classList.toggle("show", show); }
+    const edge = show ? cx - (d - startD) : cx;
+    setEdge(el, edge > 0 ? Math.round(edge * 10) / 10 : 0);
+  }
 
   scheduleLoopSeams();
   if(tunerShown) drawTuner();
@@ -584,7 +664,7 @@ async function ensureStarted(){
   updateBanner();
 
   T0 = AC.currentTime + 0.08;                   // audio always starts from the top
-  seamK = -1;
+  seamK = -1; clkOff = null; lagCur = null;
   started = true;
   playing = true;
   widget.classList.add("playing");
@@ -624,7 +704,7 @@ async function resumeTransport(){
   unlockIOSAudio();                              // sync, inside the tap
   if(AC && AC.state !== "running") await AC.resume().catch(() => {});
   T0 = AC.currentTime - pausedElapsed;           // pick the transport back up in place
-  seamK = -1;
+  seamK = -1; clkOff = null; lagCur = null;
   playing = true;
   STEMS.forEach(id => { if(stemOn[id]) enableStem(id, AC.currentTime); });
   raf = requestAnimationFrame(frame);
@@ -650,9 +730,16 @@ stage.addEventListener("click", e => {
   lastPtr = "";
   if(!viaMouse && !e.target.closest(".start")) toggleTransport();
 });
+const inField = el => /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+// stop a focused button from also "clicking" when the space bar is released
+addEventListener("keyup", e => { if(e.code === "Space" && !inField(e.target)) e.preventDefault(); });
 addEventListener("keydown", e => {
   const typing = /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(e.target.tagName);
-  if(e.code === "Space" && !typing){ e.preventDefault(); toggleTransport(); return; }
+  if(e.code === "Space" && !inField(e.target) && !e.ctrlKey && !e.metaKey && !e.altKey){
+    e.preventDefault();                          // no page scroll, no button click
+    if(!e.repeat) toggleTransport();             // holding the bar down doesn't flicker play/pause
+    return;
+  }
   if(e.code === "KeyT" && !typing){ tunerShown = !tunerShown; drawTuner(); return; }
   if(e.code === "KeyI" && !typing){
     introShown = !introShown;
@@ -694,7 +781,7 @@ function drawTuner(){
     document.body.appendChild(tunerEl);
   }
   tunerEl.hidden = false;
-  const lag = AC ? Math.round(outputLagPx()) : 0;
+  const lag = Math.round(lagCur || 0);
   tunerEl.innerHTML =
     `sync <b>${SYNC_OFFSET_PX} px</b>  ·  ← → nudge (⇧=10) · 0 reset<br>` +
     `device-lag comp <b>${lagComp ? "on" : "off"}</b> (−${lag}px) · L toggle<br>` +
@@ -828,9 +915,14 @@ window.__widget = { get info(){ return {
 }; } };
 
 (async function boot(){
+  measureCursorX();
   const files = new Set(["dot_-_empty.svg"]);
   GROUPS.forEach(g => g.dots.forEach(d => files.add(d)));
-  await Promise.all([...files].map(fetchSVG));
+  await Promise.all([
+    ...[...files].map(fetchSVG),
+    ...LAYERS.map(L => fetchArt(L.file)),
+    fetchArt("cursor.svg"),
+  ]);
 
   seedRandom();
   buildStage();
@@ -839,7 +931,7 @@ window.__widget = { get info(){ return {
   updateBanner();
   drawTuner();
 
-  addEventListener("resize", () => { if(!playing) parkLayers(); });
+  addEventListener("resize", () => { measureCursorX(); if(!playing) parkLayers(); });
 
   if(introShown) buildIntroPanel();
 
