@@ -54,7 +54,19 @@ const LAYERS = [
   { id:"gtr_hi",     file:"gtrhi_midi.svg",    stems:["gtr_hi"] },
   { id:"mm_fx",      file:"mmfx_midi.svg",     stems:["mm_fx"] },
 ];
-LAYERS.forEach(L => L.w = MASTER_W);                // all tiles are one loop wide
+/* every tile repeats every MASTER_W px (one loop). The art files aren't all exactly
+   6400 px wide (staff.svg is 6402, drums_midi.svg is 6401), so each image is drawn at
+   its own true scaled width and pulled back with a negative margin so the repeat
+   distance stays MASTER_W. That removes the hairline gap at the loop seam and the
+   ~1 px staff-vs-notes drift toward the end of the loop. */
+const NATIVE_W = { staff:6402, drums:6401 };
+LAYERS.forEach(L => {
+  L.w    = MASTER_W;
+  L.imgW = Math.round(MASTER_W * (NATIVE_W[L.id] || 6400) / 6400 * 100) / 100;
+});
+/* per-lane visual nudge (px, negative = lane arrives at the cursor a touch later).
+   drums_midi measured ~25 ms earlier than the drum audio relative to perc/bass. */
+const LANE_SYNC_PX = { drums: -2 };
 
 const STEMS = ["drums","perc","bass","bass_distort","gtr_low","gtr_hi","gtr_chords","mm","mm_fx","synth","synth_fx"];
 
@@ -200,6 +212,17 @@ async function loadAudio(){
   }));
 }
 
+/* smoothed visual clock. AudioContext.currentTime advances in coarse steps on phones,
+   which makes the scroll judder; we ride performance.now() and only let the audio
+   clock pull us gently (2 %/frame), re-anchoring if the two ever disagree by >250 ms. */
+let clkOff = null;
+function audioNow(){
+  const p = performance.now() / 1000, inst = AC.currentTime - p;
+  if(clkOff === null || Math.abs(inst - clkOff) > 0.25) clkOff = inst;
+  else clkOff += (inst - clkOff) * 0.02;
+  return p + clkOff;
+}
+
 const loopPos = () => ((AC.currentTime - T0) % LOOP_DUR + LOOP_DUR) % LOOP_DUR;
 
 /* how far (px) the visual should trail the clock to match the real output path.
@@ -209,11 +232,20 @@ const loopPos = () => ((AC.currentTime - T0) % LOOP_DUR + LOOP_DUR) % LOOP_DUR;
    LAG_CAP to 0 to disable device compensation entirely. */
 const LAG_BASELINE = 0.02, LAG_CAP = 0.30;
 let lagComp = localStorage.getItem("mbw_lagcomp") !== "0";   // toggle with L in the tuner
-function outputLagPx(){
+function rawLagPx(){
   if(!lagComp) return 0;
   const l = AC && AC.outputLatency;
   if(typeof l !== "number" || !isFinite(l)) return 0;
   return Math.min(LAG_CAP, Math.max(0, l - LAG_BASELINE)) * SCROLL_PPS;
+}
+/* phones report a jumpy outputLatency; follow it slowly (max ~6 px/s) so the
+   picture never lurches sideways when the number changes. */
+let lagCur = null;
+function outputLagPx(){
+  const t = rawLagPx();
+  if(lagCur === null) lagCur = t;
+  else lagCur += Math.max(-0.1, Math.min(0.1, t - lagCur));
+  return lagCur;
 }
 
 /* audio + its midi always enter at the start of the next bar */
@@ -341,9 +373,9 @@ function buildStage(){
     const track = document.createElement("div");
     track.className = "track";
     track.style.left = "calc(var(--cursor-x) - " + L.w + "px)";
-    const copies = Math.ceil((window.innerWidth + 2 * L.w) / L.w) + 2;
+    const copies = Math.ceil((Math.max(window.innerWidth, 2000) - cursorX()) / L.w) + 2;   // 3 on phones (was 5)
     let html = "";
-    for(let c = 0; c < copies; c++) html += `<img src="${asset(L.file)}" alt="" draggable="false" width="${L.w}">`;
+    for(let c = 0; c < copies; c++) html += `<img src="${asset(L.file)}" alt="" draggable="false" style="width:${L.imgW}px;margin-right:${(L.w - L.imgW).toFixed(2)}px">`;
     track.innerHTML = html;
     track.querySelectorAll("img").forEach(img =>
       img.addEventListener("error", () => { missing.add(L.file); updateBanner(); }, { once:true }));
@@ -352,7 +384,14 @@ function buildStage(){
   });
 
   const ci = new Image();
-  ci.onload  = () => cursor.insertBefore(ci, cursor.firstChild);
+  ci.onload  = () => {
+    cursor.insertBefore(ci, cursor.firstChild);
+    const fb = cursor.querySelector(".fallback");        // extra 2px line: start it at the triangle's base
+    if(fb){
+      const tri = 19.5 * CURSOR_H / 589;                 // triangle height in on-screen px
+      fb.style.top = tri + "px"; fb.style.height = (CURSOR_H - tri) + "px";
+    }
+  };
   ci.onerror = () => { missing.add("cursor.svg"); updateBanner(); };
   ci.src = asset("cursor.svg");
 
@@ -400,12 +439,13 @@ function refreshLayers(){
 
 function frame(){
   if(!playing) return;
-  const dist = (AC.currentTime - T0) * SCROLL_PPS + SYNC_OFFSET_PX - outputLagPx();
+  const dist = (audioNow() - T0) * SCROLL_PPS + SYNC_OFFSET_PX - outputLagPx();
   const cx = cursorX();
 
   LAYERS.forEach(L => {
     const el = layerEl(L.id);
-    el.firstElementChild.style.transform = "translateX(" + (-(dist % L.w)) + "px)";
+    const d  = dist + (LANE_SYNC_PX[L.id] || 0);
+    el.firstElementChild.style.transform = "translateX(" + (-(d % L.w)) + "px)";
 
     if(L.staff){
       const edge = cx - dist;                 // sweeps in once on first load, then seamless
@@ -422,7 +462,7 @@ function frame(){
       if(ds.length) startD = Math.min(...ds);
     }
     el.classList.toggle("show", startD != null);
-    const edge = startD != null ? cx - (dist - startD) : cx;
+    const edge = startD != null ? cx - (d - startD) : cx;
     el.style.setProperty("--edge", (edge > 0 ? edge : 0) + "px");
   });
 
@@ -584,7 +624,7 @@ async function ensureStarted(){
   updateBanner();
 
   T0 = AC.currentTime + 0.08;                   // audio always starts from the top
-  seamK = -1;
+  seamK = -1; clkOff = null; lagCur = null;
   started = true;
   playing = true;
   widget.classList.add("playing");
@@ -624,7 +664,7 @@ async function resumeTransport(){
   unlockIOSAudio();                              // sync, inside the tap
   if(AC && AC.state !== "running") await AC.resume().catch(() => {});
   T0 = AC.currentTime - pausedElapsed;           // pick the transport back up in place
-  seamK = -1;
+  seamK = -1; clkOff = null; lagCur = null;
   playing = true;
   STEMS.forEach(id => { if(stemOn[id]) enableStem(id, AC.currentTime); });
   raf = requestAnimationFrame(frame);
@@ -650,9 +690,16 @@ stage.addEventListener("click", e => {
   lastPtr = "";
   if(!viaMouse && !e.target.closest(".start")) toggleTransport();
 });
+const inField = el => /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
+// stop a focused button from also "clicking" when the space bar is released
+addEventListener("keyup", e => { if(e.code === "Space" && !inField(e.target)) e.preventDefault(); });
 addEventListener("keydown", e => {
   const typing = /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(e.target.tagName);
-  if(e.code === "Space" && !typing){ e.preventDefault(); toggleTransport(); return; }
+  if(e.code === "Space" && !inField(e.target) && !e.ctrlKey && !e.metaKey && !e.altKey){
+    e.preventDefault();                          // no page scroll, no button click
+    if(!e.repeat) toggleTransport();             // holding the bar down doesn't flicker play/pause
+    return;
+  }
   if(e.code === "KeyT" && !typing){ tunerShown = !tunerShown; drawTuner(); return; }
   if(e.code === "KeyI" && !typing){
     introShown = !introShown;
@@ -694,7 +741,7 @@ function drawTuner(){
     document.body.appendChild(tunerEl);
   }
   tunerEl.hidden = false;
-  const lag = AC ? Math.round(outputLagPx()) : 0;
+  const lag = Math.round(lagCur || 0);
   tunerEl.innerHTML =
     `sync <b>${SYNC_OFFSET_PX} px</b>  ·  ← → nudge (⇧=10) · 0 reset<br>` +
     `device-lag comp <b>${lagComp ? "on" : "off"}</b> (−${lag}px) · L toggle<br>` +
