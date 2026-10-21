@@ -127,7 +127,47 @@ async function fetchSVG(file){
 let AC = null, master = null, limiterNode = null;
 const buffers = {}, voices = {};
 
-async function loadAudio(){
+/* ---- iPhone / iPad fix ----------------------------------------------------
+   By default iOS treats Web Audio as "ambient" sound, which the side
+   ringer/silent switch mutes. Two things switch the page to "playback" sound
+   (like a music app), which ignores the switch:
+     1. navigator.audioSession.type = "playback"   (newer iOS)
+     2. playing a silent <audio> element           (older iOS fallback)
+   We do both. They must run inside a tap, so they're called from the
+   start/resume handlers below. Harmless on desktop and Android. */
+let silentEl = null;
+function makeSilentWavUrl(){
+  const rate = 8000, n = rate;                              // 1 s, mono, 16-bit
+  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o, s) => { for(let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, n * 2, true);
+  for(let i = 0; i < n; i++) v.setInt16(44 + i * 2, i % 2 ? 1 : -1, true);   // ~-90 dB, inaudible
+  return URL.createObjectURL(new Blob([buf], { type:"audio/wav" }));
+}
+function unlockIOSAudio(){
+  try{ if(navigator.audioSession) navigator.audioSession.type = "playback"; }catch(e){}
+  try{
+    if(!silentEl){
+      silentEl = new Audio(makeSilentWavUrl());
+      silentEl.loop = true;
+      silentEl.setAttribute("playsinline", "");
+      silentEl.setAttribute("x-webkit-airplay", "deny");
+    }
+    const p = silentEl.play();
+    if(p && p.catch) p.catch(() => {});
+  }catch(e){}
+}
+function releaseIOSAudio(){
+  try{ if(silentEl) silentEl.pause(); }catch(e){}
+}
+
+/* create the audio engine. runs synchronously inside the tap so iOS allows sound. */
+function initAudio(){
+  if(AC) return;
   AC = new (window.AudioContext || window.webkitAudioContext)();
 
   // master bus:  voices → master(drive) → limiter(brick wall) → destination
@@ -140,6 +180,17 @@ async function loadAudio(){
   limiter.release.value   = 0.25;
   master.connect(limiter).connect(AC.destination);
   limiterNode = limiter;
+
+  // play one silent sample right away: the classic "unlock" for iOS Safari/Chrome
+  try{
+    const b = AC.createBuffer(1, 1, 22050);
+    const s = AC.createBufferSource();
+    s.buffer = b; s.connect(AC.destination); s.start(0);
+  }catch(e){}
+}
+
+async function loadAudio(){
+  initAudio();
   await Promise.all(STEMS.map(async id => {
     try{
       const r = await fetch(asset(id + ".mp3")); if(!r.ok) throw 0;
@@ -519,8 +570,16 @@ async function ensureStarted(){
   starting = true;
   startEl.classList.add("hidden");
 
+  // everything in this block runs synchronously inside the visitor's tap.
+  // iOS only allows sound if the audio engine is created + resumed right here,
+  // BEFORE we wait on any downloads.
+  unlockIOSAudio();
+  initAudio();
+  const resumed = AC.resume().catch(() => {});
+
   await loadAudio();
-  if(AC.state === "suspended") await AC.resume();
+  await resumed;
+  if(AC.state !== "running") await AC.resume().catch(() => {});
   updateBanner();
 
   T0 = AC.currentTime + 0.08;                   // audio always starts from the top
@@ -550,6 +609,7 @@ function pauseTransport(){
     Object.keys(voices).forEach(id => { try{ voices[id].src.stop(); }catch(e){} delete voices[id]; });
     // keep voiceStartDist so resume shows the full left side (no fresh sweep-in)
     if(AC) AC.suspend();
+    releaseIOSAudio();                          // let iOS go back to normal when paused
   }, 25);
   widget.classList.remove("playing");
   startEl.classList.remove("hidden");
@@ -560,7 +620,8 @@ async function resumeTransport(){
   if(!started || playing) return;
   startEl.classList.add("hidden");
   widget.classList.add("playing");
-  if(AC && AC.state === "suspended") await AC.resume();
+  unlockIOSAudio();                              // sync, inside the tap
+  if(AC && AC.state !== "running") await AC.resume().catch(() => {});
   T0 = AC.currentTime - pausedElapsed;           // pick the transport back up in place
   seamK = -1;
   playing = true;
@@ -575,7 +636,19 @@ function toggleTransport(){
 }
 
 startEl.addEventListener("click", toggleTransport);
-stage.addEventListener("pointerdown", e => { if(!e.target.closest(".start")) toggleTransport(); });
+// Mouse / pen: toggle on press (pointerdown), exactly like before.
+// Touch: toggle on the finished tap (click), because iPhones only allow audio
+// to start from a completed tap, not from the first touch.
+let lastPtr = "";
+stage.addEventListener("pointerdown", e => {
+  lastPtr = e.pointerType;
+  if(e.pointerType !== "touch" && !e.target.closest(".start")) toggleTransport();
+});
+stage.addEventListener("click", e => {
+  const viaMouse = lastPtr === "mouse" || lastPtr === "pen";   // already handled on press
+  lastPtr = "";
+  if(!viaMouse && !e.target.closest(".start")) toggleTransport();
+});
 addEventListener("keydown", e => {
   const typing = /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(e.target.tagName);
   if(e.code === "Space" && !typing){ e.preventDefault(); toggleTransport(); return; }
