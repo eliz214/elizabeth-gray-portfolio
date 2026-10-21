@@ -65,8 +65,8 @@ LAYERS.forEach(L => {
   L.imgW = Math.round(MASTER_W * (NATIVE_W[L.id] || 6400) / 6400 * 100) / 100;
 });
 /* per-lane visual nudge (px, negative = lane arrives at the cursor a touch later).
-   drums_midi measured ~25 ms earlier than the drum audio relative to perc/bass. */
-const LANE_SYNC_PX = { drums: -2 };
+   (drums stays at 0; try -2 if the drums ever feel early.) */
+const LANE_SYNC_PX = { drums: 0 };
 
 const STEMS = ["drums","perc","bass","bass_distort","gtr_low","gtr_hi","gtr_chords","mm","mm_fx","synth","synth_fx"];
 
@@ -128,6 +128,21 @@ let SYNC_OFFSET_PX = (() => {
    3. ASSETS
    =========================================================================== */
 const svgText = {};
+/* WHY THIS EXISTS: iPhones round each SVG <img>'s height down to a whole pixel
+   (e.g. 299.9 -> 299). Normally an SVG then "fits" itself inside the box and centres
+   itself, which shrinks the art a little and slides it sideways — by a different
+   amount for every file. That is what pushed the staff, notes, drums and cursor
+   out of line with each other on phones. Telling each SVG to stretch to fill its
+   box (preserveAspectRatio="none") makes the rounding harmless. */
+const artUrl = {};     // file -> blob: URL of that SVG with stretch-to-fill added
+async function fetchArt(file){
+  try{
+    const r = await fetch(asset(file)); if(!r.ok) throw 0;
+    let t = await r.text();
+    t = t.replace(/<svg\b([^>]*)>/, (m, a) => /preserveAspectRatio/.test(a) ? m : `<svg preserveAspectRatio="none"${a}>`);
+    artUrl[file] = URL.createObjectURL(new Blob([t], { type:"image/svg+xml" }));
+  }catch(e){ artUrl[file] = asset(file); }
+}
 async function fetchSVG(file){
   try{ const r = await fetch(asset(file)); if(!r.ok) throw 0; svgText[file] = await r.text(); }
   catch(e){ svgText[file] = null; }
@@ -349,6 +364,13 @@ const startEl = document.getElementById("start");
 const layerEl = id => document.getElementById("layer-" + id);
 const trackEl = id => layerEl(id).firstElementChild;
 
+const DPR  = window.devicePixelRatio || 1;
+const snap = x => Math.round(x * DPR) / DPR;           // land on a real screen pixel: no shimmer
+function setEdge(el, v){                               // only touch the style when it actually changed
+  const s = v + "px";
+  if(el._edge !== s){ el._edge = s; el.style.setProperty("--edge", s); }
+}
+
 function cursorX(){
   return parseFloat(getComputedStyle(widget).getPropertyValue("--cursor-x")) || 36;
 }
@@ -375,7 +397,7 @@ function buildStage(){
     track.style.left = "calc(var(--cursor-x) - " + L.w + "px)";
     const copies = Math.ceil((Math.max(window.innerWidth, 2000) - cursorX()) / L.w) + 2;   // 3 on phones (was 5)
     let html = "";
-    for(let c = 0; c < copies; c++) html += `<img src="${asset(L.file)}" alt="" draggable="false" style="width:${L.imgW}px;margin-right:${(L.w - L.imgW).toFixed(2)}px">`;
+    for(let c = 0; c < copies; c++) html += `<img src="${artUrl[L.file] || asset(L.file)}" alt="" draggable="false" style="width:${L.imgW}px;margin-right:${(L.w - L.imgW).toFixed(2)}px">`;
     track.innerHTML = html;
     track.querySelectorAll("img").forEach(img =>
       img.addEventListener("error", () => { missing.add(L.file); updateBanner(); }, { once:true }));
@@ -393,7 +415,7 @@ function buildStage(){
     }
   };
   ci.onerror = () => { missing.add("cursor.svg"); updateBanner(); };
-  ci.src = asset("cursor.svg");
+  ci.src = artUrl["cursor.svg"] || asset("cursor.svg");
 
   document.getElementById("startBtn").innerHTML =
     `<img src="${asset('icon_-_play.svg')}" alt="play" draggable="false">`;
@@ -406,7 +428,7 @@ function parkLayers(){
   const cx = cursorX();
   LAYERS.forEach(L => {
     trackEl(L.id).style.transform = "translateX(0px)";
-    layerEl(L.id).style.setProperty("--edge", cx + "px");
+    setEdge(layerEl(L.id), cx);
   });
 }
 
@@ -445,11 +467,11 @@ function frame(){
   LAYERS.forEach(L => {
     const el = layerEl(L.id);
     const d  = dist + (LANE_SYNC_PX[L.id] || 0);
-    el.firstElementChild.style.transform = "translateX(" + (-(d % L.w)) + "px)";
+    el.firstElementChild.style.transform = "translate3d(" + snap(-(d % L.w)) + "px,0,0)";
 
     if(L.staff){
       const edge = cx - dist;                 // sweeps in once on first load, then seamless
-      el.style.setProperty("--edge", (edge > 0 ? edge : 0) + "px");
+      setEdge(el, edge > 0 ? Math.round(edge * 10) / 10 : 0);
       return;
     }
 
@@ -463,7 +485,7 @@ function frame(){
     }
     el.classList.toggle("show", startD != null);
     const edge = startD != null ? cx - (d - startD) : cx;
-    el.style.setProperty("--edge", (edge > 0 ? edge : 0) + "px");
+    setEdge(el, edge > 0 ? Math.round(edge * 10) / 10 : 0);
   });
 
   scheduleLoopSeams();
@@ -877,7 +899,11 @@ window.__widget = { get info(){ return {
 (async function boot(){
   const files = new Set(["dot_-_empty.svg"]);
   GROUPS.forEach(g => g.dots.forEach(d => files.add(d)));
-  await Promise.all([...files].map(fetchSVG));
+  await Promise.all([
+    ...[...files].map(fetchSVG),
+    ...LAYERS.map(L => fetchArt(L.file)),
+    fetchArt("cursor.svg"),
+  ]);
 
   seedRandom();
   buildStage();
