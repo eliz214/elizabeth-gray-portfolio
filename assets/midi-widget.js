@@ -25,6 +25,7 @@ const STRIP_H       = Math.round(26 * S) + 4;        // drum/perc strip box ≈ 
 const STAGE_H       = LANE_TOP + STAFF_H + STRIP_GAP + Math.round(26 * S) + 3;
 
 const FADE          = 0.005;                         // 5 ms — every audible audio cut
+const MM_FX_FADE_IN = 0.5;                           // 500 ms audio-only fade-in when mm_fx is toggled on by the visitor
 const MASTER_GAIN   = 2.6;                           // pre-limiter drive — raise for more loudness
 const LIMIT_CEIL_DB = -1.0;                          // brick-wall ceiling so the sum never clips
                                                     // (2025-09-05 stems run ~5 dB hotter than the old
@@ -227,7 +228,7 @@ function entryTime(){
 const FOCUS_DUCK = Math.pow(10, -2   / 20);      // −2 dB for non-focused tracks
 const FOCUS_BUMP = Math.pow(10, +0.3 / 20);      // +0.3 dB for the focused track
 
-function enableStem(id, at){
+function enableStem(id, at, fadeSec = FADE){
   if(voices[id] || !buffers[id]) return;
   const buf = buffers[id];
   const src = AC.createBufferSource(); src.buffer = buf; src.loop = true;
@@ -238,7 +239,7 @@ function enableStem(id, at){
   const offset = (((at - T0) % LOOP_DUR + LOOP_DUR) % LOOP_DUR) % buf.duration;
   src.start(at, offset);
   gMute.gain.setValueAtTime(0, at);
-  gMute.gain.linearRampToValueAtTime(1, at + FADE);            // 5 ms fade-in
+  gMute.gain.linearRampToValueAtTime(1, at + fadeSec);         // 5 ms fade-in (500 ms for a user-toggled mm_fx)
   voices[id] = { src, gMute, gFocus };
   // keep an existing catch-up origin (pause/resume) — only a fresh unmute sweeps in
   if(voiceStartDist[id] == null) voiceStartDist[id] = (at - T0) * SCROLL_PPS;
@@ -300,7 +301,7 @@ function syncAudio(){
   if(!started || !playing) return;
   const at = entryTime();
   STEMS.forEach(id => {
-    if(stemOn[id] && !voices[id]) enableStem(id, at);
+    if(stemOn[id] && !voices[id]) enableStem(id, at, id === "mm_fx" ? MM_FX_FADE_IN : FADE);   // only visitor toggles come through here
     else if(!stemOn[id] && voices[id]) disableStem(id);
   });
 }
